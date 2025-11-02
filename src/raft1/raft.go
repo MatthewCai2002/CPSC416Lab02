@@ -31,40 +31,41 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	currentTerm     int
-    votedFor        *int
-	log             []*LogEntry
+	currentTerm int
+    votedFor *int
+	log []*logEntry
 
 	// Volatile state
-    commitIndex     int // latest log entry that was committed
-    lastApplied     int // latest log entry that was actually executed, <= commitIndex
+    commitIndex int // latest log entry that was committed
+    lastApplied int // latest log entry that was actually executed, <= commitIndex
 
     // Leader state
 	// leader is responsible for making sure followers logs are up to date and for giving data to followers
 	// 
-    nextIndex       []int // tracks the next log entry to give to each follower
-    matchIndex      []int // tracks the actual latest log entry copied by each follower, this is how we keep track of if an entry has been majority appended and is safe to commit
+    nextIndex []int // tracks the next log entry to give to each follower
+    matchIndex []int // tracks the actual latest log entry copied by each follower, this is how we keep track of if an entry has been majority appended and is safe to commit
 
     // Role 
-    role           roleType // "Follower", "Candidate", "Leader"
+    role roleType
 
     // Timing
     electionTimeout time.Duration
     heartbeatInterval time.Duration
-    electionTimer   *time.Timer
-    heartbeatTimer  *time.Timer
+    electionTimer *time.Timer
+    heartbeatTimer *time.Timer
 
 }
 
 type roleType int
 const (
-	Follower roleType = iota
-	Candidate
-	Leader
+	follower roleType = iota
+	candidate
+	leader
 )
 
 type logEntry struct {
-    term    int
+    term int
+	index int
     command any 
 }
 
