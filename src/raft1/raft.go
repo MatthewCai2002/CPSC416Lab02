@@ -34,6 +34,7 @@ type Raft struct {
 
 	currentTerm int
     votedFor *int
+	votesGranted int
 	log []*logEntry
 
 	// Volatile state
@@ -51,7 +52,7 @@ type Raft struct {
     // Timing
     electionTimeout time.Duration
     heartbeatInterval time.Duration
-
+	lastHeartBeat time.Time
 }
 
 type roleType int
@@ -140,12 +141,16 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	candidateTerm int
+	CandidateLogLength int
+	CandidateId int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+
 }
 
 // example RequestVote RPC handler.
@@ -233,8 +238,16 @@ func (rf *Raft) ticker() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
+		rf.mu.Lock()
+		timeSinceHB := time.Since(rf.lastHeartBeat)
 
-
+		// leader can't start elections
+		if ((rf.role != Leader) && 
+		(timeSinceHB >= rf.electionTimeout)) {
+			// start election
+			rf.startElection()
+		}
+		rf.mu.Unlock()
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
@@ -242,6 +255,33 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) startElection() {
+	rf.role = Candidate
+	rf.currentTerm++
+	rf.votedFor = &rf.me
+	rf.lastHeartBeat = time.Now()
+
+	rf.votesGranted = 1
+	
+	for key, _ := range rf.peers {
+		if key == rf.me {
+			continue
+		}
+		// TODO add to args and reply
+
+	}
+}
+
+func (rf *Raft) {
+	args := RequestVoteArgs{}
+	reply := RequestVoteReply{}
+	args.CandidateId = rf.me
+	args.candidateTerm = rf.currentTerm
+	args.CandidateLogLength = len(rf.log)
+
+	ok := rf.sendRequestVote(key, &args, &reply)
+	
+}
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -265,6 +305,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = nil
 	rf.log = []*logEntry{{term: rf.currentTerm, index: 0, command: nil}}
+	rf.votesGranted = 0
 
 	// init volatile server state
 	rf.commitIndex = 0
@@ -282,6 +323,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	
 	rf.electionTimeout = minRange + offset
 	rf.heartbeatInterval = 125 * time.Millisecond
+	rf.lastHeartBeat = time.Now()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
