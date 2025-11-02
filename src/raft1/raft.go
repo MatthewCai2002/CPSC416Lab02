@@ -31,6 +31,7 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+
 	currentTerm int
     votedFor *int
 	log []*logEntry
@@ -41,7 +42,6 @@ type Raft struct {
 
     // Leader state
 	// leader is responsible for making sure followers logs are up to date and for giving data to followers
-	// 
     nextIndex []int // tracks the next log entry to give to each follower
     matchIndex []int // tracks the actual latest log entry copied by each follower, this is how we keep track of if an entry has been majority appended and is safe to commit
 
@@ -51,16 +51,14 @@ type Raft struct {
     // Timing
     electionTimeout time.Duration
     heartbeatInterval time.Duration
-    electionTimer *time.Timer
-    heartbeatTimer *time.Timer
 
 }
 
 type roleType int
 const (
-	follower roleType = iota
-	candidate
-	leader
+	Follower roleType = iota
+	Candidate
+	Leader
 )
 
 type logEntry struct {
@@ -76,6 +74,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (3A).
+	term = rf.currentTerm
+	isleader = rf.role == Leader
 	return term, isleader
 }
 
@@ -204,7 +204,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
-
+	
 
 	return index, term, isLeader
 }
@@ -260,12 +260,34 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (3A, 3B, 3C).
 
+	// init general serer state
+	rf.role = Follower
+	rf.currentTerm = 0
+	rf.votedFor = nil
+	rf.log = []*logEntry{{term: rf.currentTerm, index: 0, command: nil}}
+
+	// init volatile server state
+	rf.commitIndex = 0
+	rf.lastApplied = 0 
+
+	// init leader state, every server is a follower initially
+	rf.nextIndex = nil
+	rf.matchIndex = nil
+
+	// init time intervals
+	minRange := 1 * time.Second
+	maxRange := 2 * time.Second
+	timeRange := maxRange - minRange
+	offset := time.Duration(rand.Int63n(int64(timeRange)))
+	
+	rf.electionTimeout = minRange + offset
+	rf.heartbeatInterval = 125 * time.Millisecond
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
