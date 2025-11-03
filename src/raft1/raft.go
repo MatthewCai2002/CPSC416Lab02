@@ -338,12 +338,13 @@ func (rf *Raft) requestVoteRoutine(key int, totalPeers int) {
 			rf.role = Follower
 			rf.votedFor = nil
 		} else if reply.VoteGranted {
-			votesGranted++
-			if votesGranted > totalPeers/2 && rf.role == Candidate {
+			rf.votesGranted++
+			if rf.votesGranted > totalPeers/2 && rf.role == Candidate {
 				rf.role = Leader
 				// rf.initLeaderState()
 				// start sending heartbeats separately
 			}
+		}
 	}
 
 }
