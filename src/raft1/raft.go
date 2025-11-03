@@ -8,6 +8,7 @@ package raft
 
 import (
 	//	"bytes"
+	// "fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -239,6 +240,8 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  // currentTerm, for leader to update itself
 	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	ConflictTerm int
+	ConflictIndex int
 }
 
 // AppendEntries RPC handler
@@ -246,45 +249,55 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	
-	reply.Term = rf.currentTerm
 	reply.Success = false
-	
+	reply.ConflictTerm = -1
+    reply.ConflictIndex = 0
+
 	// If term is outdated, reject
 	if args.Term < rf.currentTerm {
 		return
 	}
 
-	// Consistency check
-	// if follower does not have entry at prevLogIndex -> fail
-	if args.PrevLogIndex >= len(rf.log) {
-		return
-	}
-
-	// if follower does have entry but does not match leader -> fail
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		// Delete the conflicting entry and everything after
-		rf.log = rf.log[:args.PrevLogIndex] 
-		return
-	}
-	
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = Follower
+		rf.persist()
 	}
-	
+	reply.Term = rf.currentTerm
+
 	rf.lastHeartbeat = time.Now()
 	rf.electionTimeout = time.Duration(300+rand.Intn(300)) * time.Millisecond // longer because of readme
-	
+
 	// For Part A, we just need heartbeats (empty entries)
 	// In Part B, we'll check PrevLogIndex/PrevLogTerm and append entries
-	if len(args.Entries) == 0 {
-		// This is a heartbeat
-		reply.Success = true
+	// if len(args.Entries) == 0 {
+	// 	// This is a heartbeat
+	// 	reply.Success = true
+	// }
+
+	// Consistency check
+	// if follower does not have entry at prevLogIndex -> conflict
+	if args.PrevLogIndex >= len(rf.log) {
+		reply.ConflictTerm = -1
+    	reply.ConflictIndex = len(rf.log)
+		return
 	}
 
-	// if there are remaining conflicting entries past prevLogIndex
-	// overwrite them with entries from leader
+	// if follower does have entry but does not match leader -> conflict
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		// get conflicting term and idx of first log entry for term
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+
+		idx := args.PrevLogIndex
+		for idx > 0 && rf.log[idx-1].Term == reply.ConflictTerm {
+			idx--
+		}
+		reply.ConflictIndex = idx
+		return
+	}
+
+	// logs are consistent, overwrite any conflict entries with entries from leader
 	i := 0
 	start := args.PrevLogIndex + 1
 	for ; i < len(args.Entries); i++ {
@@ -371,26 +384,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
     	}
 		go rf.replicateToPeer(peerId)
 	}
-	// wait for peers to copy new entry to their logs (majority just need to be copied)
-	// if majority is copied -> commit the log
-	// after committing we can apply to leader state machine
-	// return output
-	// each go routine will continue to append entry to a computer indefinitely until it succeeds
-
-
 	return index, term, isLeader
 }
 
 // replicates last log entry to given peer
 func (rf *Raft) replicateToPeer(peerId int) {
-	// send append entries rpc
-	// if fail -> consistency check failed
-	//	decrement nextIndex[peerId] and try again
-	//  keep retrying until appendEntries succeeds
-	// 
 	for {
 		rf.mu.Lock()
-		// Stop if we're not the leader anymore or killed
+		// stop if we're not the leader anymore or killed
 		if rf.state != Leader || rf.killed() {
 			rf.mu.Unlock()
 			return
@@ -402,7 +403,6 @@ func (rf *Raft) replicateToPeer(peerId int) {
 			nextIdx = 1
 		}
 
-		// Build AppendEntries args based on nextIndex
 		prevLogIndex := nextIdx - 1
 		prevLogTerm := rf.log[prevLogIndex].Term
 		entries := append([]LogEntry(nil), rf.log[nextIdx:]...) // copy log entries from nextIdx to end of log
@@ -420,12 +420,13 @@ func (rf *Raft) replicateToPeer(peerId int) {
 
 		ok := rf.sendAppendEntries(peerId, &args, &reply)
 		if !ok {
-			return // peer is down or lost network packet
+			// network failure or crash, wait a little bit then try again
+			time.Sleep(50 * time.Millisecond)
+			continue 
 		}
 
 		rf.mu.Lock()
 		if reply.Term > rf.currentTerm {
-			// Step down to follower
 			rf.currentTerm = reply.Term
 			rf.state = Follower
 			rf.votedFor = -1
@@ -435,7 +436,6 @@ func (rf *Raft) replicateToPeer(peerId int) {
 		}
 
 		if rf.state != Leader || rf.currentTerm != args.Term {
-			// Term changed or we’re no longer leader — abort
 			rf.mu.Unlock()
 			return
 		}
@@ -445,40 +445,93 @@ func (rf *Raft) replicateToPeer(peerId int) {
 			matchIdx := args.PrevLogIndex + len(args.Entries)
 			rf.matchIndex[peerId] = matchIdx
 			rf.nextIndex[peerId] = matchIdx + 1
-
-			// Try to advance commitIndex
+			
 			rf.updateCommitIndex()
 			rf.mu.Unlock()
-			return
+
+			time.Sleep(50 * time.Millisecond)
+            continue
 		} else {
-			// Log inconsistency — decrement nextIndex and retry
-			// Simple approach: back off one by one
-			if rf.nextIndex[peerId] > 1 {
-				rf.nextIndex[peerId]--
+
+			// follower has conflict with entry at prevLogIndex
+			if (reply.ConflictTerm == -1) {
+				// follower log is shorter than leader log
+				rf.nextIndex[peerId] = reply.ConflictIndex
+			} else {
+				// find the first entry in leader log with conflicting term
+				// this will be the first index we need to send to follower
+
+				// possible for conflicting term to not be in leader log
+				idx := -1
+				for i := len(rf.log) - 1; i >= 0; i-- {
+					if rf.log[i].Term == reply.ConflictTerm {
+						idx = i
+						break
+					}
+				}
+				
+				if idx != -1 {
+					// found first entry of conflicting term in leader log
+					rf.nextIndex[peerId] = idx + 1
+				} else {
+					// did not find entry
+					rf.nextIndex[peerId] = reply.ConflictIndex
+				}
 			}
+	
 			rf.mu.Unlock()
-			// Retry immediately (loop again)
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
 }
 
 func (rf *Raft) updateCommitIndex() {
-	// Only leader executes this
+	// only leader executes this
 	for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
-		count := 1 // count leader itself
+		count := 1 
 		for i := range rf.peers {
 			if i != rf.me && rf.matchIndex[i] >= N {
 				count++
 			}
 		}
-		if count > len(rf.peers)/2 && rf.log[N].Term == rf.currentTerm {
+		if count > len(rf.peers) / 2 && rf.log[N].Term == rf.currentTerm {
 			rf.commitIndex = N
-			// TODO: send ApplyMsg for committed entries
+			// fmt.Printf("updated commit index N: %d, count: %d \n", N, count)
 			break
 		}
 	}
 }
+
+func (rf *Raft) applyLoop(applyCh chan raftapi.ApplyMsg) {
+	for {
+		rf.mu.Lock()
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
+
+		// apply all entries between lastApplied and commitIndex
+		for rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			entry := rf.log[rf.lastApplied]
+
+			applyMsg := raftapi.ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: rf.lastApplied,
+			}
+
+			// send the apply message to the service
+			rf.mu.Unlock()
+			applyCh <- applyMsg
+			rf.mu.Lock()
+		}
+
+		rf.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
@@ -594,6 +647,7 @@ func (rf *Raft) startElection() {
 							rf.nextIndex[i] = len(rf.log)
 							rf.matchIndex[i] = 0
 						}
+						rf.matchIndex[rf.me] = len(rf.log) - 1
 						rf.lastHeartbeat = time.Now()
 					}
 				}
@@ -649,36 +703,6 @@ func (rf *Raft) sendHeartbeats() {
 				rf.mu.Unlock()
 			}
 		}(i)
-	}
-}
-
-func (rf *Raft) applyLoop(applyCh chan raftapi.ApplyMsg) {
-	for {
-		rf.mu.Lock()
-		if rf.killed() {
-			rf.mu.Unlock()
-			return
-		}
-
-		// Apply all entries between lastApplied and commitIndex
-		for rf.lastApplied < rf.commitIndex {
-			rf.lastApplied++
-			entry := rf.log[rf.lastApplied]
-
-			applyMsg := raftapi.ApplyMsg{
-				CommandValid: true,
-				Command:      entry.Command,
-				CommandIndex: rf.lastApplied,
-			}
-
-			// Send the apply message to the service
-			rf.mu.Unlock()
-			applyCh <- applyMsg
-			rf.mu.Lock()
-		}
-
-		rf.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
