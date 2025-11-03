@@ -19,7 +19,6 @@ import (
 	"cpsc416-2025w1/tester1"
 )
 
-
 // Server state constants
 const (
 	Follower = iota
@@ -47,6 +46,7 @@ type Raft struct {
 	// Volatile state on all servers
 	state       int // Follower, Candidate, or Leader
 	commitIndex int // index of highest log entry known to be committed
+	lastApplied int // index of highest log entry known to be applied to state machine
 	
 	// Volatile state on leaders (reinitialized after election)
 	nextIndex  []int // for each server, index of next log entry to send
@@ -253,6 +253,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		return
 	}
+
+	// Consistency check
+	// if follower does not have entry at prevLogIndex -> fail
+	if args.PrevLogIndex >= len(rf.log) {
+		return
+	}
+
+	// if follower does have entry but does not match leader -> fail
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		// Delete the conflicting entry and everything after
+		rf.log = rf.log[:args.PrevLogIndex] 
+		return
+	}
 	
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
@@ -268,6 +281,38 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if len(args.Entries) == 0 {
 		// This is a heartbeat
 		reply.Success = true
+	}
+
+	// if there are remaining conflicting entries past prevLogIndex
+	// overwrite them with entries from leader
+	i := 0
+	start := args.PrevLogIndex + 1
+	for ; i < len(args.Entries); i++ {
+		if start + i >= len(rf.log) {
+			break
+		}
+		if rf.log[start + i].Term != args.Entries[i].Term {
+			rf.log = rf.log[:start + i]
+			break
+		}
+	}
+
+	// append any remaining entries
+	if i < len(args.Entries) {
+		rf.log = append(rf.log, args.Entries[i:]...)
+		rf.persist()
+	}
+
+	reply.Success = true
+
+	// update commit index of follower
+	if args.LeaderCommit > rf.commitIndex {
+		lastNewIndex := len(rf.log) - 1
+		if args.LeaderCommit < lastNewIndex {
+			rf.commitIndex = args.LeaderCommit
+		} else {
+			rf.commitIndex = lastNewIndex
+		}
 	}
 }
 
@@ -296,9 +341,143 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// check if leader, return if not
+	isLeader = rf.state == Leader
+	if !isLeader {
+		return index, term, isLeader
+	}
+
+	// create new log entry for command
+	newEntry := LogEntry{
+		Term: rf.currentTerm,
+		Command: command,
+	}
+
+	// append entry to leader log
+	rf.log = append(rf.log, newEntry)
+	rf.persist()
+
+	// set return values
+	index = len(rf.log) - 1 
+	term = rf.currentTerm
 	
+	// issue append entries to all peers
+	for peerId := range rf.peers {
+		if peerId == rf.me {
+       		continue
+    	}
+		go rf.replicateToPeer(peerId)
+	}
+	// wait for peers to copy new entry to their logs (majority just need to be copied)
+	// if majority is copied -> commit the log
+	// after committing we can apply to leader state machine
+	// return output
+	// each go routine will continue to append entry to a computer indefinitely until it succeeds
+
 
 	return index, term, isLeader
+}
+
+// replicates last log entry to given peer
+func (rf *Raft) replicateToPeer(peerId int) {
+	// send append entries rpc
+	// if fail -> consistency check failed
+	//	decrement nextIndex[peerId] and try again
+	//  keep retrying until appendEntries succeeds
+	// 
+	for {
+		rf.mu.Lock()
+		// Stop if we're not the leader anymore or killed
+		if rf.state != Leader || rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
+
+		// get the next log entry to send to peer
+		nextIdx := rf.nextIndex[peerId]
+		if nextIdx <= 0 {
+			nextIdx = 1
+		}
+
+		// Build AppendEntries args based on nextIndex
+		prevLogIndex := nextIdx - 1
+		prevLogTerm := rf.log[prevLogIndex].Term
+		entries := append([]LogEntry(nil), rf.log[nextIdx:]...) // copy log entries from nextIdx to end of log
+		args := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      entries,
+			LeaderCommit: rf.commitIndex,
+		}
+		rf.mu.Unlock()
+
+		reply := AppendEntriesReply{}
+
+		ok := rf.sendAppendEntries(peerId, &args, &reply)
+		if !ok {
+			return // peer is down or lost network packet
+		}
+
+		rf.mu.Lock()
+		if reply.Term > rf.currentTerm {
+			// Step down to follower
+			rf.currentTerm = reply.Term
+			rf.state = Follower
+			rf.votedFor = -1
+			rf.persist()
+			rf.mu.Unlock()
+			return
+		}
+
+		if rf.state != Leader || rf.currentTerm != args.Term {
+			// Term changed or we’re no longer leader — abort
+			rf.mu.Unlock()
+			return
+		}
+
+		if reply.Success {
+			// Update follower’s matchIndex and nextIndex
+			matchIdx := args.PrevLogIndex + len(args.Entries)
+			rf.matchIndex[peerId] = matchIdx
+			rf.nextIndex[peerId] = matchIdx + 1
+
+			// Try to advance commitIndex
+			rf.updateCommitIndex()
+			rf.mu.Unlock()
+			return
+		} else {
+			// Log inconsistency — decrement nextIndex and retry
+			// Simple approach: back off one by one
+			if rf.nextIndex[peerId] > 1 {
+				rf.nextIndex[peerId]--
+			}
+			rf.mu.Unlock()
+			// Retry immediately (loop again)
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func (rf *Raft) updateCommitIndex() {
+	// Only leader executes this
+	for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
+		count := 1 // count leader itself
+		for i := range rf.peers {
+			if i != rf.me && rf.matchIndex[i] >= N {
+				count++
+			}
+		}
+		if count > len(rf.peers)/2 && rf.log[N].Term == rf.currentTerm {
+			rf.commitIndex = N
+			// TODO: send ApplyMsg for committed entries
+			break
+		}
+	}
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -473,6 +652,36 @@ func (rf *Raft) sendHeartbeats() {
 	}
 }
 
+func (rf *Raft) applyLoop(applyCh chan raftapi.ApplyMsg) {
+	for {
+		rf.mu.Lock()
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
+
+		// Apply all entries between lastApplied and commitIndex
+		for rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			entry := rf.log[rf.lastApplied]
+
+			applyMsg := raftapi.ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: rf.lastApplied,
+			}
+
+			// Send the apply message to the service
+			rf.mu.Unlock()
+			applyCh <- applyMsg
+			rf.mu.Lock()
+		}
+
+		rf.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -497,6 +706,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = []LogEntry{{Term: 0, Command: nil}} // dummy entry at index 0
 	rf.state = Follower
 	rf.commitIndex = 0
+	rf.lastApplied = 0
 	
 	// Randomize election timeout (between 300ms and 600ms)
 	rf.electionTimeout = time.Duration(300+rand.Intn(300)) * time.Millisecond
@@ -504,6 +714,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.readPersist(persister.ReadRaftState())
 	go rf.ticker()
+	go rf.applyLoop(applyCh)
 
 	return rf
 }
