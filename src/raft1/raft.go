@@ -141,8 +141,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
-	candidateTerm int
-	CandidateLogLength int
+	CandidateTerm int
+	CandidateLogIndex int
+	CadnditateLogTerm int
 	CandidateId int
 }
 
@@ -150,12 +151,51 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
-
+	Term int
+	VoteGranted bool
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	
+	// If candidate’s term < currentTerm, reject
+	if args.Term < rf.currentTerm {
+		return
+	}
+
+	// If candidate’s term > currentTerm, update and step down
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.role = Follower
+		rf.votedFor = nil
+	}
+
+	// Check if we’ve already voted for someone else
+	if rf.votedFor != nil && *rf.votedFor != args.CandidateId {
+		return
+	}
+
+	// Check if candidate’s log is at least as up-to-date as receiver’s log
+	lastLog := rf.log[len(rf.log)-1]
+	upToDate := (args.CadnditateLogTerm > lastLog.term) || 
+	((args.CadnditateLogTerm == lastLog.term) && (args.LastLogIndex >= lastLog.index))
+
+	if !upToDate {
+		return
+	}
+
+	// Grant vote
+	rf.votedFor = &args.CandidateId
+	reply.VoteGranted = true
+
+	// Reset election timeout (since we heard from a candidate)
+	rf.lastHeartBeat = time.Now()
+
+	// Persist state (term and voteFor are persistent)
+	rf.persist()
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -238,16 +278,22 @@ func (rf *Raft) ticker() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
+
+		// extract rf state
 		rf.mu.Lock()
 		timeSinceHB := time.Since(rf.lastHeartBeat)
+		role := rf.role
+		electionTimeout := rf.electionTimeout
+		rf.mu.Unlock()
 
 		// leader can't start elections
-		if ((rf.role != Leader) && 
-		(timeSinceHB >= rf.electionTimeout)) {
+		if ((role != Leader) && 
+		(timeSinceHB >= electionTimeout)) {
 			// start election
 			rf.startElection()
+		} else {
+			// send heartbeats from leader
 		}
-		rf.mu.Unlock()
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
@@ -256,32 +302,53 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) startElection() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// update follower to candidate
 	rf.role = Candidate
 	rf.currentTerm++
 	rf.votedFor = &rf.me
 	rf.lastHeartBeat = time.Now()
-
 	rf.votesGranted = 1
-	
+
+	totalPeers := len(rf.peers)
+
+	// request vote in parallel to every server
 	for key, _ := range rf.peers {
 		if key == rf.me {
 			continue
 		}
-		// TODO add to args and reply
+		go rf.requestVoteRoutine(key, totalPeers)
 
 	}
 }
 
-func (rf *Raft) {
+func (rf *Raft) requestVoteRoutine(key int, totalPeers int) {
 	args := RequestVoteArgs{}
 	reply := RequestVoteReply{}
 	args.CandidateId = rf.me
-	args.candidateTerm = rf.currentTerm
-	args.CandidateLogLength = len(rf.log)
+	args.CandidateTerm = rf.currentTerm
+	args.CadnditateLogTerm = rf.log[len(rf.log) - 1].term
+	args.CandidateLogIndex = len(rf.log) - 1
 
 	ok := rf.sendRequestVote(key, &args, &reply)
-	
+	if ok {
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.role = Follower
+			rf.votedFor = nil
+		} else if reply.VoteGranted {
+			votesGranted++
+			if votesGranted > totalPeers/2 && rf.role == Candidate {
+				rf.role = Leader
+				// rf.initLeaderState()
+				// start sending heartbeats separately
+			}
+	}
+
 }
+
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
