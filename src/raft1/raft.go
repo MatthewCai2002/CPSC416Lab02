@@ -377,17 +377,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = len(rf.log) - 1 
 	term = rf.currentTerm
 	
-	// issue append entries to all peers
-	for peerId := range rf.peers {
-		if peerId == rf.me {
-       		continue
-    	}
-		go rf.replicateToPeer(peerId)
-	}
 	return index, term, isLeader
 }
 
-// replicates last log entry to given peer
+// indefinitely loops replicating leader's log to peers
+// reads leader's log each iteration, no need to call in start()
+// just need to update leader's log in start()
 func (rf *Raft) replicateToPeer(peerId int) {
 	for {
 		rf.mu.Lock()
@@ -646,6 +641,9 @@ func (rf *Raft) startElection() {
 						for i := range rf.peers {
 							rf.nextIndex[i] = len(rf.log)
 							rf.matchIndex[i] = 0
+							// once leader is elected start go routines that continuously
+							// replicate leader's log, 1 for each peer
+							go rf.replicateToPeer(i)
 						}
 						rf.matchIndex[rf.me] = len(rf.log) - 1
 						rf.lastHeartbeat = time.Now()
