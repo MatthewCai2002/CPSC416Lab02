@@ -144,6 +144,13 @@ func (rf *Raft) readPersist(data []byte) {
         if len(rf.log) == 0 {
             rf.log = []LogEntry{{Term: rf.lastIncludedTerm}}
         }
+        // Initialize commitIndex and lastApplied to at least lastIncludedIndex
+        if rf.commitIndex < rf.lastIncludedIndex {
+            rf.commitIndex = rf.lastIncludedIndex
+        }
+        if rf.lastApplied < rf.lastIncludedIndex {
+            rf.lastApplied = rf.lastIncludedIndex
+        }
         rf.mu.Unlock()
     }
 
@@ -622,8 +629,8 @@ func (rf *Raft) replicateToPeer(peerId int) {
 				}
 				
 				if idx != -1 {
-					// found first entry of conflicting term in leader log
-					rf.nextIndex[peerId] = idx + 1
+					// found first entry of conflicting term in leader log, convert to absolute index
+					rf.nextIndex[peerId] = rf.lastIncludedIndex + idx + 1
 				} else {
 					// did not find entry
 					rf.nextIndex[peerId] = reply.ConflictIndex
@@ -661,15 +668,21 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
     // Discard log up to snapshot
     // Find position where args.LastIncludedIndex falls in current log
     if args.LastIncludedIndex <= rf.getLastIndex() {
-        // keep entries after snapshot index
-        // and add dummy at base
-        sliceIdx := args.LastIncludedIndex - rf.lastIncludedIndex
-        newLog := make([]LogEntry, 1)
-        newLog[0] = LogEntry{Term: args.LastIncludedTerm}
-        if sliceIdx+1 < len(rf.log) {
-            newLog = append(newLog, rf.log[sliceIdx+1:]...)
+        // Check if term matches at snapshot index
+        termAtIdx := rf.getTermAtIndex(args.LastIncludedIndex)
+        if termAtIdx == args.LastIncludedTerm {
+            // Terms match, keep entries after snapshot index
+            sliceIdx := args.LastIncludedIndex - rf.lastIncludedIndex
+            newLog := make([]LogEntry, 1)
+            newLog[0] = LogEntry{Term: args.LastIncludedTerm}
+            if sliceIdx+1 < len(rf.log) {
+                newLog = append(newLog, rf.log[sliceIdx+1:]...)
+            }
+            rf.log = newLog
+        } else {
+            // Terms don't match, discard all entries and start fresh
+            rf.log = []LogEntry{{Term: args.LastIncludedTerm}}
         }
-        rf.log = newLog
     } else {
         // snapshot goes beyond our log; keep only dummy
         rf.log = []LogEntry{{Term: args.LastIncludedTerm}}
@@ -683,7 +696,14 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
     if rf.lastApplied < rf.lastIncludedIndex {
         rf.lastApplied = rf.lastIncludedIndex
     }
+    
+    /*
+	// Update heartbeat to prevent election timeout
+    rf.lastHeartbeat = time.Now()
+    rf.electionTimeout = time.Duration(300+rand.Intn(300)) * time.Millisecond
 
+	*/
+	
     // Persist state and snapshot
     w := new(bytes.Buffer)
     e := labgob.NewEncoder(w)
@@ -733,6 +753,11 @@ func (rf *Raft) applyLoop(applyCh chan raftapi.ApplyMsg) {
 		if rf.killed() {
 			rf.mu.Unlock()
 			return
+		}
+
+		// Skip entries that are already in snapshot
+		if rf.lastApplied < rf.lastIncludedIndex {
+			rf.lastApplied = rf.lastIncludedIndex
 		}
 
 		// apply all entries between lastApplied and commitIndex
@@ -799,7 +824,16 @@ func (rf *Raft) getTermAtIndex(index int) int {
 
 // Helper: get entry at absolute index
 func (rf *Raft) getEntryAtIndex(index int) LogEntry {
+    if index == rf.lastIncludedIndex {
+        return LogEntry{Term: rf.lastIncludedTerm}
+    }
+    if index < rf.lastIncludedIndex {
+        panic("getEntryAtIndex: index < lastIncludedIndex")
+    }
     sliceIdx := index - rf.lastIncludedIndex
+    if sliceIdx < 0 || sliceIdx >= len(rf.log) {
+        panic("getEntryAtIndex: index out of range")
+    }
     return rf.log[sliceIdx]
 }
 
@@ -893,14 +927,15 @@ func (rf *Raft) startElection() {
 						rf.state = Leader
 						rf.nextIndex = make([]int, len(rf.peers))
 						rf.matchIndex = make([]int, len(rf.peers))
+						lastIndex := rf.getLastIndex()
 						for i := range rf.peers {
-							rf.nextIndex[i] = len(rf.log)
+							rf.nextIndex[i] = lastIndex + 1
 							rf.matchIndex[i] = 0
 							// once leader is elected start go routines that continuously
 							// replicate leader's log, 1 for each peer
 							go rf.replicateToPeer(i)
 						}
-						rf.matchIndex[rf.me] = len(rf.log) - 1
+						rf.matchIndex[rf.me] = lastIndex
 						rf.lastHeartbeat = time.Now()
 					}
 				}
