@@ -7,14 +7,14 @@ package raft
 // Make() creates a new raft peer that implements the raft interface.
 
 import (
-	//	"bytes"
+	"bytes"
 	// "fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	//	"cpsc416-2025w1/labgob"
+	"cpsc416-2025w1/labgob"
 	"cpsc416-2025w1/labrpc"
 	"cpsc416-2025w1/raftapi"
 	"cpsc416-2025w1/tester1"
@@ -87,6 +87,16 @@ func (rf *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (3C).
+    w := new(bytes.Buffer)
+    e := labgob.NewEncoder(w)
+
+    // encode persistent state
+    e.Encode(rf.currentTerm)
+    e.Encode(rf.votedFor)
+    e.Encode(rf.log)
+
+    raftstate := w.Bytes()
+    rf.persister.Save(raftstate, nil) 
 	// Example:
 	// w := new(bytes.Buffer)
 	// e := labgob.NewEncoder(w)
@@ -103,6 +113,24 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (3C).
+
+	r := bytes.NewBuffer(data)
+    d := labgob.NewDecoder(r)
+
+    var currentTerm int
+    var votedFor int
+    var log []LogEntry
+
+    if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+        panic("failed to decode persisted Raft state")
+    } else {
+        rf.mu.Lock()
+        rf.currentTerm = currentTerm
+        rf.votedFor = votedFor
+        rf.log = log
+        rf.mu.Unlock()
+    }
+
 	// Example:
 	// r := bytes.NewBuffer(data)
 	// d := labgob.NewDecoder(r)
@@ -173,6 +201,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = Follower
+		rf.persist()
 	}
 	
 	// Check if we can vote for this candidate
@@ -192,6 +221,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.lastHeartbeat = time.Now()
 		rf.electionTimeout = time.Duration(300+rand.Intn(300)) * time.Millisecond
 		reply.VoteGranted = true
+		rf.persist()
 	}
 }
 
@@ -308,6 +338,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = rf.log[:start + i]
 			break
 		}
+		// TODO: may need to add persist here
 	}
 
 	// append any remaining entries
@@ -588,7 +619,8 @@ func (rf *Raft) startElection() {
 	rf.state = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	
+	rf.persist()
+
 	lastLogIndex := len(rf.log) - 1
 	lastLogTerm := 0
 	if lastLogIndex >= 0 {
@@ -632,6 +664,7 @@ func (rf *Raft) startElection() {
 					rf.votedFor = -1
 					rf.electionTimeout = time.Duration(300+rand.Intn(300)) * time.Millisecond
 					rf.lastHeartbeat = time.Now()
+					rf.persist()
 				} else if rf.state == Candidate && currentTerm == rf.currentTerm && reply.VoteGranted {
 					newVotes := atomic.AddInt32(&votes, 1)
 					if int(newVotes) >= votesNeeded && rf.state == Candidate {
@@ -697,6 +730,7 @@ func (rf *Raft) sendHeartbeats() {
 					rf.currentTerm = reply.Term
 					rf.state = Follower
 					rf.votedFor = -1
+					rf.persist()
 				}
 				rf.mu.Unlock()
 			}
