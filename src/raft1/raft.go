@@ -393,6 +393,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         return
     }
 
+    // Special case: if prevLogIndex equals lastIncludedIndex, verify term matches
+    if args.PrevLogIndex == rf.lastIncludedIndex {
+        if args.PrevLogTerm != rf.lastIncludedTerm {
+            // Terms don't match at snapshot boundary
+            reply.ConflictTerm = rf.lastIncludedTerm
+            reply.ConflictIndex = rf.lastIncludedIndex
+            return
+        }
+    }
+
     // translate absolute index to slice index
     if args.PrevLogIndex > rf.getLastIndex() {
         // follower's log is shorter than leader expects
@@ -697,12 +707,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
         rf.lastApplied = rf.lastIncludedIndex
     }
     
-    /*
-	// Update heartbeat to prevent election timeout
+    // Update heartbeat to prevent election timeout
+    // This is critical: InstallSnapshot is a form of leader communication
+    // Without this, followers might start elections even after receiving snapshots
     rf.lastHeartbeat = time.Now()
     rf.electionTimeout = time.Duration(300+rand.Intn(300)) * time.Millisecond
-
-	*/
 	
     // Persist state and snapshot
     w := new(bytes.Buffer)
