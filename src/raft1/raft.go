@@ -560,6 +560,8 @@ func (rf *Raft) replicateToPeer(peerId int) {
                 rf.persist()
                 rf.mu.Unlock()
                 return
+            } else if replySnap.Term == rf.currentTerm {
+                rf.lastHeartbeat = time.Now()
             }
             // after installing snapshot, set nextIndex just after snapshot
             rf.nextIndex[peerId] = rf.lastIncludedIndex + 1
@@ -866,7 +868,15 @@ func (rf *Raft) ticker() {
 				rf.mu.Unlock()
 			}
         } else if state == Leader {
-            rf.sendHeartbeats()
+            // If leader hasn't heard back from any peers for a while, step down.
+            if time.Since(lastHeartbeat) > 2*electionTimeout {
+                rf.mu.Lock()
+                rf.state = Follower
+                rf.votedFor = -1
+                rf.mu.Unlock()
+            } else {
+                rf.sendHeartbeats()
+            }
         }
 
 		// pause for a short time to avoid busy waiting
@@ -963,8 +973,6 @@ func (rf *Raft) sendHeartbeats() {
 		rf.mu.Unlock()
 		return
 	}
-	
-	rf.lastHeartbeat = time.Now()
     rf.mu.Unlock()
     
     // Send AppendEntries (heartbeat) to all followers using per-follower nextIndex
@@ -1001,6 +1009,8 @@ func (rf *Raft) sendHeartbeats() {
                     rf.state = Follower
                     rf.votedFor = -1
                     rf.persist()
+                } else if reply.Term == rf.currentTerm {
+                    rf.lastHeartbeat = time.Now()
                 }
                 rf.mu.Unlock()
             }
