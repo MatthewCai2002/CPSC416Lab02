@@ -379,10 +379,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// For Part A, we just need heartbeats (empty entries)
 	// In Part B, we'll check PrevLogIndex/PrevLogTerm and append entries
-	// if len(args.Entries) == 0 {
-	// 	// This is a heartbeat
-	// 	reply.Success = true
-	// }
+	if len(args.Entries) == 0 {
+		// This is a heartbeat
+		reply.Success = true
+	}
 
     // Consistency check with snapshot-aware indices
     // if follower does not have entry at prevLogIndex -> conflict
@@ -415,36 +415,38 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     if rf.getTermAtIndex(args.PrevLogIndex) != args.PrevLogTerm {
 		// get conflicting term and idx of first log entry for term
         reply.ConflictTerm = rf.getTermAtIndex(args.PrevLogIndex)
-
+		
         idx := args.PrevLogIndex
         for idx > rf.lastIncludedIndex && rf.getTermAtIndex(idx-1) == reply.ConflictTerm {
             idx--
         }
+		rf.log = rf.log[:idx]
         reply.ConflictIndex = idx
 		return
 	}
 
 	// logs are consistent, overwrite any conflict entries with entries from leader
-	i := 0
-    start := args.PrevLogIndex + 1
-	for ; i < len(args.Entries); i++ {
-        if start + i > rf.getLastIndex() {
-			break
-		}
-        if rf.getTermAtIndex(start + i) != args.Entries[i].Term {
-            // cut log up to slice index of (start+i)
-            cut := (start + i) - rf.lastIncludedIndex
-            rf.log = rf.log[:cut]
-			break
-		}
-		// TODO: may need to add persist here
-	}
+	// i := 0
+    // start := args.PrevLogIndex + 1
+	// for ; i < len(args.Entries); i++ {
+    //     if start + i > rf.getLastIndex() {
+	// 		break
+	// 	}
+    //     if rf.getTermAtIndex(start + i) != args.Entries[i].Term {
+    //         // cut log up to slice index of (start+i)
+    //         cut := (start + i) - rf.lastIncludedIndex
+    //         rf.log = rf.log[:cut]
+	// 		break
+	// 	}
+	// }
 
 	// append any remaining entries
-	if i < len(args.Entries) {
-        rf.log = append(rf.log, args.Entries[i:]...)
-		rf.persist()
-	}
+	// if i < len(args.Entries) {
+	// 	rf.persist()
+	// }
+	rf.log = append(rf.log, args.Entries...)
+	rf.persist()
+
 
 	reply.Success = true
 
@@ -752,7 +754,6 @@ func (rf *Raft) updateCommitIndex() {
 		}
         if count > len(rf.peers) / 2 && rf.getTermAtIndex(N) == rf.currentTerm {
 			rf.commitIndex = N
-			// fmt.Printf("updated commit index N: %d, count: %d \n", N, count)
 			break
 		}
 	}
@@ -864,7 +865,6 @@ func (rf *Raft) ticker() {
 				rf.startElection()
 				rf.mu.Lock()
 				rf.electionTimeout = time.Duration(300+rand.Intn(300)) * time.Millisecond
-				rf.lastHeartbeat = time.Now()
 				rf.mu.Unlock()
 			}
         } else if state == Leader {
@@ -917,16 +917,13 @@ func (rf *Raft) startElection() {
 	// Send RequestVote to all peers
 	votes := int32(1) // vote for self 
 	
-	var wg sync.WaitGroup
 	
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 		
-		wg.Add(1)
 		go func(server int) {
-			defer wg.Done()
 			
 			reply := RequestVoteReply{}
 			if rf.sendRequestVote(server, &args, &reply) {
@@ -952,7 +949,9 @@ func (rf *Raft) startElection() {
 							rf.matchIndex[i] = 0
 							// once leader is elected start go routines that continuously
 							// replicate leader's log, 1 for each peer
-							go rf.replicateToPeer(i)
+							if i != rf.me {
+								go rf.replicateToPeer(i)
+							}
 						}
 						rf.matchIndex[rf.me] = lastIndex
 						rf.lastHeartbeat = time.Now()
@@ -962,22 +961,23 @@ func (rf *Raft) startElection() {
 		}(i)
 	}
 	
-	wg.Wait()
 }
 
 // Send heartbeats to all followers
 func (rf *Raft) sendHeartbeats() {
 	rf.mu.Lock()
 	
-	if rf.state != Leader || time.Since(rf.lastHeartbeat) < 100*time.Millisecond {
+	if rf.state != Leader {
 		rf.mu.Unlock()
 		return
 	}
+	peers := rf.peers
+	me := rf.me
     rf.mu.Unlock()
     
     // Send AppendEntries (heartbeat) to all followers using per-follower nextIndex
-    for i := range rf.peers {
-        if i == rf.me {
+    for i := range peers {
+        if i == me {
             continue
         }
         go func(server int) {
@@ -1016,6 +1016,8 @@ func (rf *Raft) sendHeartbeats() {
             }
         }(i)
     }
+
+	time.Sleep(100*time.Millisecond)
 }
 
 // the service or tester wants to create a Raft server. the ports
