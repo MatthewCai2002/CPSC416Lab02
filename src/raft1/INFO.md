@@ -10,4 +10,4 @@ ChatGPT was asked to identify areas of redundant RPC calls to increase performan
 
 ## Team Member Contribution
 Bryan Zhou - 16079717 - Collaboratively worked on 3A implementation, responsible for 3D implementation, code reviews for 3B, 3C
-Matthew Cai - # student number - Collaboratively worked on 3A implementation, responsible for 3B, 3C implementation, code reviews for 3A, 3D
+Matthew Cai - 54356670 - Collaboratively worked on 3A implementation, responsible for 3B, 3C implementation, code reviews for 3A, 3D
