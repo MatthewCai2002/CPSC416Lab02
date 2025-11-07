@@ -1,4 +1,4 @@
-## GenAI Usage
+## GenAI Usage in raft.go
 Claude 4.5 was asked to identify and explain specific behaviour in edge case scenarios surrounding the RAFT protocol
 Cursor was asked to amend draft election operations to be able to handle re-election backoff in the case of split votes
 Cursor was asked to simplify the draft data structures for the rpc call arguments to be more effective
