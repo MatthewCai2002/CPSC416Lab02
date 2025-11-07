@@ -377,13 +377,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.lastHeartbeat = time.Now()
 	rf.electionTimeout = time.Duration(300+rand.Intn(300)) * time.Millisecond // longer because of readme
 
-	// For Part A, we just need heartbeats (empty entries)
-	// In Part B, we'll check PrevLogIndex/PrevLogTerm and append entries
-	// if len(args.Entries) == 0 {
-	// 	// This is a heartbeat
-	// 	reply.Success = true
-	// }
-
     // Consistency check with snapshot-aware indices
     // if follower does not have entry at prevLogIndex -> conflict
     if args.PrevLogIndex < rf.lastIncludedIndex {
@@ -437,7 +430,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
             rf.log = rf.log[:cut]
 			break
 		}
-		// TODO: may need to add persist here
 	}
 
 	// append any remaining entries

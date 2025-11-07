@@ -3,6 +3,9 @@ Claude 4.5 was asked to identify and explain specific behaviour in edge case sce
 Cursor was asked to amend draft election operations to be able to handle re-election backoff in the case of split votes
 Cursor was asked to simplify the draft data structures for the rpc call arguments to be more effective
 Cursor was asked to rearrange the election timeout logic to fit the ReadME.md hints (moved timeouts and heartbeat update calls)
+ChatGPT was asked to help debug appendEntry append to follower log logic after consistency checks
+ChatGPT was asked to amend leader back off algorithm to implement the optimization described in the RAFT paper
+ChatGPT was asked to identify areas of redundant RPC calls to increase performance
 
 
 ## Team Member Contribution
